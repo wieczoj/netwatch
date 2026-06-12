@@ -644,12 +644,49 @@ static void signal_handler(int sig) {
     gtk_main_quit();
 }
 
+static void print_about(void) {
+    printf("\n");
+    printf("╔════════════════════════════════════════════════════════════╗\n");
+    printf("║                                                            ║\n");
+    printf("║                    NetWatch v1.2                           ║\n");
+    printf("║        Real-time Network Connection Monitor                ║\n");
+    printf("║                                                            ║\n");
+    printf("╠════════════════════════════════════════════════════════════╣\n");
+    printf("║                                                            ║\n");
+    printf("║  Modern Linux kernel technology:                           ║\n");
+    printf("║    • eBPF with kprobes                                     ║\n");
+    printf("║    • CO-RE (BPF_CORE_READ)                                 ║\n");
+    printf("║    • perf_event for kernel→user communication              ║\n");
+    printf("║    • GTK3 + X11 compositing                                ║\n");
+    printf("║                                                            ║\n");
+    printf("║  Author:  Janusz Wieczorek                                 ║\n");
+    printf("║  License: MIT (userspace) / GPL-2.0 (eBPF)                 ║\n");
+    printf("║                                                            ║\n");
+    printf("║  Repository:                                               ║\n");
+    printf("║    https://github.com/wieczoj/netwatch                     ║\n");
+    printf("║                                                            ║\n");
+    printf("╠════════════════════════════════════════════════════════════╣\n");
+    printf("║                                                            ║\n");
+    printf("║  💝 Support development:                                   ║\n");
+    printf("║                                                            ║\n");
+    printf("║     ☕ Ko-fi:  https://ko-fi.com/netwatch                  ║\n");
+    printf("║                                                            ║\n");
+    printf("║  Donors get priority on feature requests!                  ║\n");
+    printf("║  All features eventually open-sourced in NetWatch.         ║\n");
+    printf("║                                                            ║\n");
+    printf("║  📧 Business inquiries: konradverse@gmail.com              ║\n");
+    printf("║                                                            ║\n");
+    printf("╚════════════════════════════════════════════════════════════╝\n");
+    printf("\n");
+}
+
 static void print_help(const char *prog) {
     printf("Użycie: sudo %s [OPCJE]\n\n", prog);
     printf("NetWatch v1.2 - Monitor połączeń sieciowych z eBPF\n\n");
     printf("Opcje:\n");
     printf("  -q, --quiet          Wyłącz debug na stderr\n");
     printf("  -d, --direction DIR  Filtruj kierunek (in/out/both), domyślnie: both\n");
+    printf("  -a, --about          Pokaż informacje o programie i autorze\n");
     printf("  -h, --help           Pokaż tę pomoc\n");
     printf("\nSkróty klawiszowe:\n");
     printf("  1  Pokazuj wszystkie (BOTH)\n");
@@ -662,13 +699,11 @@ static void print_help(const char *prog) {
     printf("  pomarańczowy    - warning (porty 1024-49151)\n");
     printf("  czerwony        - krytyczny (porty <1024)\n");
     printf("  czerwony bold   - FAILED/BLOCKED\n");
+    printf("\n💝 Support development: https://ko-fi.com/netwatch\n");
+    printf("📦 Source code:        https://github.com/wieczoj/netwatch\n");
 }
 
 int main(int argc, char *argv[]) {
-    if (geteuid() != 0) {
-        fprintf(stderr, "BŁĄD: Wymagane uprawnienia root\n");
-        return 1;
-    }
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-q") == 0 || strcmp(argv[i], "--quiet") == 0) {
@@ -690,7 +725,19 @@ int main(int argc, char *argv[]) {
             print_help(argv[0]);
             return 0;
         }
+        else if (strcmp(argv[i], "-a") == 0 || strcmp(argv[i], "--about") == 0) {
+            print_about();
+            return 0;
+        }
     }
+
+
+    if (geteuid() != 0) {
+        fprintf(stderr, "BŁĄD: Wymagane uprawnienia root\n");
+        return 1;
+    }
+
+
 
     const char *filter_str[] = {"BOTH", "IN", "OUT"};
     printf("[NetWatch] sizeof(struct conn_event) = %zu bajtów\n",

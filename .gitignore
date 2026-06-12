@@ -1,0 +1,11 @@
+# Compiled files
+netwatch
+netwatch.bpf.o
+vmlinux.h
+*.o
+
+# Editor files
+*~
+.*.swp
+.vscode/
+.idea/

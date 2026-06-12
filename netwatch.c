@@ -11,7 +11,7 @@
  *
  * SPDX-License-Identifier: MIT
  */
-// netwatch.c - v1.2 - dodane statusy połączeń (SUCCESS/FAILED/PENDING)
+// netwatch.c - v1.0.0 - dodane statusy połączeń (SUCCESS/FAILED/PENDING)
 
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -648,7 +648,7 @@ static void print_about(void) {
     printf("\n");
     printf("╔════════════════════════════════════════════════════════════╗\n");
     printf("║                                                            ║\n");
-    printf("║                    NetWatch v1.2                           ║\n");
+    printf("║                    NetWatch v1.0.0                         ║\n");
     printf("║        Real-time Network Connection Monitor                ║\n");
     printf("║                                                            ║\n");
     printf("╠════════════════════════════════════════════════════════════╣\n");
@@ -682,7 +682,7 @@ static void print_about(void) {
 
 static void print_help(const char *prog) {
     printf("Użycie: sudo %s [OPCJE]\n\n", prog);
-    printf("NetWatch v1.2 - Monitor połączeń sieciowych z eBPF\n\n");
+    printf("NetWatch v1.0.0 - Monitor połączeń sieciowych z eBPF\n\n");
     printf("Opcje:\n");
     printf("  -q, --quiet          Wyłącz debug na stderr\n");
     printf("  -d, --direction DIR  Filtruj kierunek (in/out/both), domyślnie: both\n");

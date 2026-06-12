@@ -214,7 +214,7 @@ Special thanks to the open source community for years of free knowledge sharing!
 📊 Project Status
 🟢 Active development — features being added regularly
 
-Current version: v1.2
+Current version: **v1.0.0** 
 
 See commit history for recent changes. Issues and PRs are welcome!
 

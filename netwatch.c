@@ -1,9 +1,4 @@
-// netwatch.c - Monitor połączeń sieciowych z półprzezroczystym overlay
-// Wykorzystuje: eBPF, memfd_create, mmap, mlock, pthread, GTK3
-// Kompilacja: make
-// Uruchomienie: sudo ./netwatch [opcje]
-//
-// Wersja: 1.1 - dodany filtr kierunku ruchu (IN/OUT/BOTH)
+// netwatch.c - v1.2 - dodane statusy połączeń (SUCCESS/FAILED/PENDING)
 
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -24,10 +19,14 @@
 #include <bpf/bpf.h>
 
 #define MAX_LOGS 100
-#define OVERLAY_WIDTH 600
-#define OVERLAY_HEIGHT 450
+#define OVERLAY_WIDTH 700
+#define OVERLAY_HEIGHT 500
 
-// ===== Struktura zdarzenia (MUSI być identyczna jak w netwatch.bpf.c) =====
+#define STATUS_PENDING  0
+#define STATUS_SUCCESS  1
+#define STATUS_FAILED   2
+
+// ===== Struktura zdarzenia =====
 struct conn_event {
     uint32_t pid;
     uint32_t uid;
@@ -38,6 +37,7 @@ struct conn_event {
     uint8_t  protocol;
     uint8_t  direction;
     uint8_t  severity;
+    uint8_t  status;          // NOWE: status połączenia
     char     comm[16];
     uint64_t ts;
 } __attribute__((packed));
@@ -61,7 +61,7 @@ static GtkTextBuffer *g_text_buffer = NULL;
 static volatile int g_running = 1;
 static int g_debug = 1;
 
-// ===== Filtrowanie po kierunku =====
+// ===== Filtrowanie =====
 typedef enum {
     FILTER_BOTH = 0,
     FILTER_IN = 1,
@@ -78,8 +78,11 @@ static GtkWidget *g_status_label = NULL;
 static int g_stats_in = 0;
 static int g_stats_out = 0;
 static int g_stats_filtered = 0;
+static int g_stats_success = 0;
+static int g_stats_failed = 0;
+static int g_stats_pending = 0;
 
-// ===== Wrappery na nowoczesne syscalle =====
+// ===== Wrappery =====
 static inline int sys_pidfd_open(pid_t pid, unsigned int flags) {
     return syscall(SYS_pidfd_open, pid, flags);
 }
@@ -101,12 +104,12 @@ static void format_ip(uint32_t ip, char *buf, size_t len) {
 // ===== Sprawdzenie czy IP jest "ciekawe" =====
 static int is_interesting_ip(uint32_t ip) {
     uint8_t a = (ip >> 0) & 0xFF;
-    if (a == 127) return 0;  // localhost
-    if (ip == 0) return 0;   // 0.0.0.0
+    if (a == 127) return 0;
+    if (ip == 0) return 0;
     return 1;
 }
 
-// ===== Sprawdź czy event pasuje do filtra kierunku =====
+// ===== Filtr kierunku =====
 static int passes_filter(struct conn_event *evt) {
     switch (g_filter) {
         case FILTER_IN:
@@ -119,9 +122,75 @@ static int passes_filter(struct conn_event *evt) {
     }
 }
 
+// ===== Łączenie zdarzeń - jeśli dotyczy istniejącego, aktualizuj =====
+static int update_existing_log(struct conn_event *evt) {
+    // Szukaj pasującego pending eventcie (ta sama 4-krotka)
+    pthread_mutex_lock(&g_log_mutex);
+    
+    int updated = 0;
+    for (int i = 0; i < g_log_count; i++) {
+        if (!g_logs[i].valid) continue;
+        
+        struct conn_event *e = &g_logs[i].event;
+        
+        // Pasuje? (porty + IP + direction)
+        if (e->status == STATUS_PENDING &&
+            e->direction == evt->direction &&
+            e->saddr == evt->saddr &&
+            e->daddr == evt->daddr &&
+            e->sport == evt->sport &&
+            e->dport == evt->dport) {
+            
+            // Aktualizuj status
+            e->status = evt->status;
+            e->ts = evt->ts;
+            
+            // Aktualizuj wiadomość
+            char saddr_str[INET_ADDRSTRLEN];
+            char daddr_str[INET_ADDRSTRLEN];
+            format_ip(e->saddr, saddr_str, sizeof(saddr_str));
+            format_ip(e->daddr, daddr_str, sizeof(daddr_str));
+            
+            const char *sev_str[] = { "INFO", "WARN", "CRIT" };
+            const char *dir_str[] = { "IN ", "OUT" };
+            const char *status_str[] = { "PEND", "OK  ", "FAIL" };
+            
+            char safe_comm[17];
+            memcpy(safe_comm, e->comm, 16);
+            safe_comm[16] = '\0';
+            
+            snprintf(g_logs[i].message, sizeof(g_logs[i].message),
+                "[%s] %s %s %s:%u -> %s:%u (pid=%u %s)",
+                sev_str[e->severity], status_str[e->status], dir_str[e->direction],
+                saddr_str, e->sport,
+                daddr_str, e->dport,
+                e->pid, safe_comm);
+            
+            updated = 1;
+            
+            if (g_debug) {
+                fprintf(stderr, "[UPDATE] Updated log[%d] to status=%s\n", 
+                        i, status_str[e->status]);
+            }
+            break;
+        }
+    }
+    
+    pthread_mutex_unlock(&g_log_mutex);
+    return updated;
+}
+
 // ===== Dodanie wpisu do logu =====
 static void add_log(struct conn_event *evt) {
     if (!evt) return;
+
+    // Jeśli to status update (SUCCESS/FAILED) - spróbuj zaktualizować istniejący
+    if (evt->status != STATUS_PENDING) {
+        if (update_existing_log(evt)) {
+            return;  // Zaktualizowano istniejący wpis
+        }
+        // Jeśli nie znaleziono - dodaj jako nowy (np. inbound accept = od razu SUCCESS)
+    }
 
     pthread_mutex_lock(&g_log_mutex);
 
@@ -137,17 +206,19 @@ static void add_log(struct conn_event *evt) {
 
     const char *sev_str[] = { "INFO", "WARN", "CRIT" };
     const char *dir_str[] = { "IN ", "OUT" };
+    const char *status_str[] = { "PEND", "OK  ", "FAIL" };
 
     int sev = (evt->severity <= 2) ? evt->severity : 0;
     int dir = (evt->direction <= 1) ? evt->direction : 0;
+    int status = (evt->status <= 2) ? evt->status : 0;
 
     char safe_comm[17];
     memcpy(safe_comm, evt->comm, 16);
     safe_comm[16] = '\0';
 
     snprintf(g_logs[idx].message, sizeof(g_logs[idx].message),
-        "[%s] %s %s:%u -> %s:%u (pid=%u %s)",
-        sev_str[sev], dir_str[dir],
+        "[%s] %s %s %s:%u -> %s:%u (pid=%u %s)",
+        sev_str[sev], status_str[status], dir_str[dir],
         saddr_str, evt->sport,
         daddr_str, evt->dport,
         evt->pid, safe_comm);
@@ -162,19 +233,19 @@ static void add_log(struct conn_event *evt) {
     }
 }
 
-// ===== Aktualizacja okna overlay =====
+// ===== Aktualizacja overlay =====
 static gboolean update_overlay(gpointer data) {
     (void)data;
     if (!g_text_buffer) return TRUE;
 
-    // Aktualizuj label statusu
     if (g_status_label) {
         const char *filter_str[] = {"BOTH", "IN only", "OUT only"};
-        char status[256];
+        char status[512];
         snprintf(status, sizeof(status),
-            "Filter: %s | IN: %d | OUT: %d | Filtered: %d",
+            "Filter: %s | IN: %d | OUT: %d | OK: %d | FAIL: %d | PEND: %d",
             filter_str[g_filter],
-            g_stats_in, g_stats_out, g_stats_filtered);
+            g_stats_in, g_stats_out,
+            g_stats_success, g_stats_failed, g_stats_pending);
         gtk_label_set_text(GTK_LABEL(g_status_label), status);
     }
 
@@ -201,11 +272,22 @@ static gboolean update_overlay(gpointer data) {
         int idx = (start_idx + i) % MAX_LOGS;
         if (!g_logs[idx].valid) continue;
 
+        // Wybór koloru wg statusu I severity
         const char *tag = "info";
-        switch (g_logs[idx].event.severity) {
-            case 2: tag = "critical"; break;
-            case 1: tag = "warning"; break;
-            default: tag = "info"; break;
+        
+        if (g_logs[idx].event.status == STATUS_FAILED) {
+            tag = "failed";  // Zawsze czerwony bold dla FAILED
+        }
+        else if (g_logs[idx].event.status == STATUS_PENDING) {
+            tag = "pending";  // Szary dla pending
+        }
+        else {
+            // SUCCESS - kolor wg severity
+            switch (g_logs[idx].event.severity) {
+                case 2: tag = "critical"; break;
+                case 1: tag = "warning"; break;
+                default: tag = "info"; break;
+            }
         }
 
         struct tm tm_result;
@@ -230,7 +312,7 @@ static gboolean update_overlay(gpointer data) {
     return TRUE;
 }
 
-// ===== Callback'i przycisków filtrowania =====
+// ===== Callbacki przycisków =====
 static void on_filter_changed(filter_mode_t new_filter) {
     g_filter = new_filter;
 
@@ -239,9 +321,7 @@ static void on_filter_changed(filter_mode_t new_filter) {
         fprintf(stderr, "[FILTER] Changed to: %s\n", mode_str[new_filter]);
     }
 
-    // Aktualizuj wygląd przycisków
     GtkStyleContext *ctx;
-
     if (g_btn_both) {
         ctx = gtk_widget_get_style_context(g_btn_both);
         if (new_filter == FILTER_BOTH)
@@ -249,7 +329,6 @@ static void on_filter_changed(filter_mode_t new_filter) {
         else
             gtk_style_context_remove_class(ctx, "filter-active");
     }
-
     if (g_btn_in) {
         ctx = gtk_widget_get_style_context(g_btn_in);
         if (new_filter == FILTER_IN)
@@ -257,7 +336,6 @@ static void on_filter_changed(filter_mode_t new_filter) {
         else
             gtk_style_context_remove_class(ctx, "filter-active");
     }
-
     if (g_btn_out) {
         ctx = gtk_widget_get_style_context(g_btn_out);
         if (new_filter == FILTER_OUT)
@@ -305,7 +383,7 @@ static gboolean on_key_press(GtkWidget *widget, GdkEventKey *event, gpointer dat
     return FALSE;
 }
 
-// ===== Tworzenie półprzezroczystego okna overlay =====
+// ===== Tworzenie okna overlay =====
 static void create_overlay_window(void) {
     g_overlay_window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
     gtk_window_set_title(GTK_WINDOW(g_overlay_window), "NetWatch");
@@ -316,8 +394,6 @@ static void create_overlay_window(void) {
     gtk_window_set_decorated(GTK_WINDOW(g_overlay_window), FALSE);
     gtk_window_set_skip_taskbar_hint(GTK_WINDOW(g_overlay_window), TRUE);
     gtk_window_set_skip_pager_hint(GTK_WINDOW(g_overlay_window), TRUE);
-
-    // WAŻNE: musi akceptować focus żeby działały skróty klawiszowe i przyciski
     gtk_window_set_accept_focus(GTK_WINDOW(g_overlay_window), TRUE);
     gtk_window_set_type_hint(GTK_WINDOW(g_overlay_window),
                               GDK_WINDOW_TYPE_HINT_NORMAL);
@@ -338,10 +414,9 @@ static void create_overlay_window(void) {
         gtk_window_move(GTK_WINDOW(g_overlay_window),
                         workarea.width - OVERLAY_WIDTH - 20, 50);
     } else {
-        gtk_window_move(GTK_WINDOW(g_overlay_window), 1200, 50);
+        gtk_window_move(GTK_WINDOW(g_overlay_window), 1100, 50);
     }
 
-    // CSS - z stylami dla przycisków
     GtkCssProvider *css = gtk_css_provider_new();
     const char *css_data =
         "window {"
@@ -393,10 +468,8 @@ static void create_overlay_window(void) {
         GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
     g_object_unref(css);
 
-    // Główny kontener pionowy
     GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
 
-    // === Pasek przycisków na górze ===
     GtkWidget *button_bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
     gtk_widget_set_halign(button_bar, GTK_ALIGN_CENTER);
     gtk_widget_set_margin_top(button_bar, 6);
@@ -414,11 +487,9 @@ static void create_overlay_window(void) {
     gtk_box_pack_start(GTK_BOX(button_bar), g_btn_in, FALSE, FALSE, 2);
     gtk_box_pack_start(GTK_BOX(button_bar), g_btn_out, FALSE, FALSE, 2);
 
-    // === Status label ===
-    g_status_label = gtk_label_new("Filter: BOTH | IN: 0 | OUT: 0 | Filtered: 0");
+    g_status_label = gtk_label_new("Filter: BOTH | IN: 0 | OUT: 0 | OK: 0 | FAIL: 0 | PEND: 0");
     gtk_widget_set_halign(g_status_label, GTK_ALIGN_START);
 
-    // === Widok tekstu ===
     GtkWidget *scroll = gtk_scrolled_window_new(NULL, NULL);
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll),
         GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
@@ -430,6 +501,7 @@ static void create_overlay_window(void) {
 
     g_text_buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(view));
 
+    // Tagi: krytyczny, warning, info + nowe: failed, pending
     gtk_text_buffer_create_tag(g_text_buffer, "critical",
         "foreground", "#ff5555",
         "weight", PANGO_WEIGHT_BOLD, NULL);
@@ -437,28 +509,32 @@ static void create_overlay_window(void) {
         "foreground", "#ffaa00", NULL);
     gtk_text_buffer_create_tag(g_text_buffer, "info",
         "foreground", "#88ff88", NULL);
+    gtk_text_buffer_create_tag(g_text_buffer, "failed",
+        "foreground", "#ff3333",
+        "weight", PANGO_WEIGHT_BOLD,
+        "underline", PANGO_UNDERLINE_SINGLE, NULL);
+    gtk_text_buffer_create_tag(g_text_buffer, "pending",
+        "foreground", "#888888",
+        "style", PANGO_STYLE_ITALIC, NULL);
 
     gtk_container_add(GTK_CONTAINER(scroll), view);
 
-    // Złożenie wszystkiego
     gtk_box_pack_start(GTK_BOX(vbox), button_bar, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(vbox), g_status_label, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(vbox), scroll, TRUE, TRUE, 0);
 
     gtk_container_add(GTK_CONTAINER(g_overlay_window), vbox);
 
-    // Skróty klawiszowe
     g_signal_connect(g_overlay_window, "key-press-event",
                      G_CALLBACK(on_key_press), NULL);
 
     g_timeout_add(200, update_overlay, NULL);
     gtk_widget_show_all(g_overlay_window);
 
-    // Ustaw początkowy stan przycisków
     on_filter_changed(g_filter);
 }
 
-// ===== Callback eBPF perf event =====
+// ===== Callback eBPF =====
 static void handle_event(void *ctx, int cpu, void *data, __u32 size) {
     (void)ctx;
 
@@ -478,19 +554,35 @@ static void handle_event(void *ctx, int cpu, void *data, __u32 size) {
         char safe_comm[17];
         memcpy(safe_comm, evt->comm, 16);
         safe_comm[16] = '\0';
+        
+        const char *status_str[] = {"PENDING", "SUCCESS", "FAILED"};
+        int s = (evt->status <= 2) ? evt->status : 0;
 
-        fprintf(stderr, "[BPF] pid=%u uid=%u comm='%s' "
+        fprintf(stderr, "[BPF] pid=%u comm='%s' "
                 "saddr=0x%08x daddr=0x%08x "
-                "sport=%u dport=%u dir=%u sev=%u\n",
-                evt->pid, evt->uid, safe_comm,
+                "sport=%u dport=%u dir=%u sev=%u status=%s\n",
+                evt->pid, safe_comm,
                 evt->saddr, evt->daddr,
                 evt->sport, evt->dport,
-                evt->direction, evt->severity);
+                evt->direction, evt->severity, status_str[s]);
     }
 
-    // Statystyki ZAWSZE liczone (przed filtrowaniem)
-    if (evt->direction == 0) g_stats_in++;
-    else g_stats_out++;
+    // Statystyki
+    if (evt->status == STATUS_PENDING) {
+        if (evt->direction == 0) g_stats_in++;
+        else g_stats_out++;
+        g_stats_pending++;
+    } else if (evt->status == STATUS_SUCCESS) {
+        g_stats_success++;
+        g_stats_pending--;  // Pending → success
+        if (g_stats_pending < 0) g_stats_pending = 0;
+        // Dla inbound (od razu success) - dolicz do in/out
+        if (evt->direction == 0 && g_stats_in == 0) g_stats_in++;
+    } else if (evt->status == STATUS_FAILED) {
+        g_stats_failed++;
+        g_stats_pending--;
+        if (g_stats_pending < 0) g_stats_pending = 0;
+    }
 
     // Filtr kierunku
     if (!passes_filter(evt)) {
@@ -518,7 +610,6 @@ static void handle_lost(void *ctx, int cpu, __u64 cnt) {
             (unsigned long long)cnt, cpu);
 }
 
-// ===== Wątek monitorujący eBPF =====
 static void *monitor_thread(void *arg) {
     struct perf_buffer *pb = (struct perf_buffer *)arg;
 
@@ -533,7 +624,6 @@ static void *monitor_thread(void *arg) {
     return NULL;
 }
 
-// ===== Obsługa sygnałów =====
 static void signal_handler(int sig) {
     (void)sig;
     fprintf(stderr, "\n[NetWatch] Otrzymano sygnał, kończę...\n");
@@ -541,35 +631,32 @@ static void signal_handler(int sig) {
     gtk_main_quit();
 }
 
-// ===== Pomoc =====
 static void print_help(const char *prog) {
     printf("Użycie: sudo %s [OPCJE]\n\n", prog);
-    printf("NetWatch v1.1 - Monitor połączeń sieciowych z eBPF\n\n");
+    printf("NetWatch v1.2 - Monitor połączeń sieciowych z eBPF\n\n");
     printf("Opcje:\n");
     printf("  -q, --quiet          Wyłącz debug na stderr\n");
     printf("  -d, --direction DIR  Filtruj kierunek (in/out/both), domyślnie: both\n");
     printf("  -h, --help           Pokaż tę pomoc\n");
-    printf("\nSkróty klawiszowe w oknie:\n");
+    printf("\nSkróty klawiszowe:\n");
     printf("  1  Pokazuj wszystkie (BOTH)\n");
     printf("  2  Tylko przychodzące (IN)\n");
     printf("  3  Tylko wychodzące (OUT)\n");
-    printf("  Q  Zakończ program\n");
-    printf("\nPrzykłady użycia:\n");
-    printf("  sudo %s                  # Wszystkie połączenia\n", prog);
-    printf("  sudo %s -d out           # Tylko wychodzące\n", prog);
-    printf("  sudo %s -d in            # Tylko przychodzące\n", prog);
-    printf("  sudo %s -d out -q        # Tylko wychodzące, cicho\n", prog);
+    printf("  Q  Zakończ\n");
+    printf("\nKolory w oknie:\n");
+    printf("  szary (italic)  - próba połączenia (PENDING)\n");
+    printf("  zielony         - sukces (INFO + OK)\n");
+    printf("  pomarańczowy    - warning (porty 1024-49151)\n");
+    printf("  czerwony        - krytyczny (porty <1024)\n");
+    printf("  czerwony bold   - FAILED/BLOCKED\n");
 }
 
-// ===== MAIN =====
 int main(int argc, char *argv[]) {
     if (geteuid() != 0) {
-        fprintf(stderr, "BŁĄD: Program wymaga uprawnień root (eBPF)\n");
-        fprintf(stderr, "Uruchom: sudo ./netwatch\n");
+        fprintf(stderr, "BŁĄD: Wymagane uprawnienia root\n");
         return 1;
     }
 
-    // Parsuj argumenty
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-q") == 0 || strcmp(argv[i], "--quiet") == 0) {
             g_debug = 0;
@@ -577,29 +664,18 @@ int main(int argc, char *argv[]) {
         else if (strcmp(argv[i], "-d") == 0 || strcmp(argv[i], "--direction") == 0) {
             if (i + 1 < argc) {
                 i++;
-                if (strcmp(argv[i], "in") == 0) {
-                    g_filter = FILTER_IN;
-                } else if (strcmp(argv[i], "out") == 0) {
-                    g_filter = FILTER_OUT;
-                } else if (strcmp(argv[i], "both") == 0) {
-                    g_filter = FILTER_BOTH;
-                } else {
-                    fprintf(stderr, "Nieznany kierunek: %s (użyj: in/out/both)\n", argv[i]);
+                if (strcmp(argv[i], "in") == 0) g_filter = FILTER_IN;
+                else if (strcmp(argv[i], "out") == 0) g_filter = FILTER_OUT;
+                else if (strcmp(argv[i], "both") == 0) g_filter = FILTER_BOTH;
+                else {
+                    fprintf(stderr, "Nieznany kierunek: %s\n", argv[i]);
                     return 1;
                 }
-            } else {
-                fprintf(stderr, "Brak wartości dla -d/--direction\n");
-                return 1;
             }
         }
         else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             print_help(argv[0]);
             return 0;
-        }
-        else {
-            fprintf(stderr, "Nieznana opcja: %s\n", argv[i]);
-            fprintf(stderr, "Użyj --help dla pomocy\n");
-            return 1;
         }
     }
 
@@ -614,7 +690,6 @@ int main(int argc, char *argv[]) {
     struct bpf_object *obj = bpf_object__open_file("netwatch.bpf.o", NULL);
     if (libbpf_get_error(obj)) {
         fprintf(stderr, "BŁĄD: Nie można otworzyć netwatch.bpf.o\n");
-        fprintf(stderr, "Upewnij się że plik jest w bieżącym katalogu.\n");
         return 1;
     }
 
@@ -626,35 +701,32 @@ int main(int argc, char *argv[]) {
 
     struct bpf_program *prog_out =
         bpf_object__find_program_by_name(obj, "trace_outbound_connect");
+    struct bpf_program *prog_state =
+        bpf_object__find_program_by_name(obj, "trace_tcp_set_state");
     struct bpf_program *prog_in =
         bpf_object__find_program_by_name(obj, "trace_inbound_accept");
 
-    if (!prog_out) {
-        fprintf(stderr, "BŁĄD: Nie znaleziono 'trace_outbound_connect'\n");
-        return 1;
-    }
-    if (!prog_in) {
-        fprintf(stderr, "BŁĄD: Nie znaleziono 'trace_inbound_accept'\n");
+    if (!prog_out || !prog_state || !prog_in) {
+        fprintf(stderr, "BŁĄD: Nie znaleziono wymaganych programów BPF\n");
+        if (!prog_out) fprintf(stderr, "  - brak trace_outbound_connect\n");
+        if (!prog_state) fprintf(stderr, "  - brak trace_tcp_set_state\n");
+        if (!prog_in) fprintf(stderr, "  - brak trace_inbound_accept\n");
         return 1;
     }
 
     struct bpf_link *link_out = bpf_program__attach(prog_out);
-    if (libbpf_get_error(link_out)) {
-        fprintf(stderr, "BŁĄD: kprobe tcp_connect: %s\n",
-                strerror(-libbpf_get_error(link_out)));
-        return 1;
-    }
-
+    struct bpf_link *link_state = bpf_program__attach(prog_state);
     struct bpf_link *link_in = bpf_program__attach(prog_in);
-    if (libbpf_get_error(link_in)) {
-        fprintf(stderr, "BŁĄD: kretprobe inet_csk_accept: %s\n",
-                strerror(-libbpf_get_error(link_in)));
+
+    if (libbpf_get_error(link_out) || libbpf_get_error(link_state) || libbpf_get_error(link_in)) {
+        fprintf(stderr, "BŁĄD podłączania kprobes\n");
         return 1;
     }
 
     printf("[NetWatch] eBPF aktywny:\n");
-    printf("  - kprobe/tcp_connect (połączenia wychodzące)\n");
-    printf("  - kretprobe/inet_csk_accept (połączenia przychodzące)\n");
+    printf("  - kprobe/tcp_connect (próby wychodzące)\n");
+    printf("  - kprobe/tcp_set_state (wyniki SUCCESS/FAILED)\n");
+    printf("  - kretprobe/inet_csk_accept (przychodzące - akceptacja)\n");
 
     int map_fd = bpf_object__find_map_fd_by_name(obj, "events");
     if (map_fd < 0) {
@@ -666,15 +738,12 @@ int main(int argc, char *argv[]) {
         handle_event, handle_lost, NULL, NULL);
 
     if (libbpf_get_error(pb)) {
-        fprintf(stderr, "BŁĄD: Nie można utworzyć perf buffer\n");
+        fprintf(stderr, "BŁĄD: perf_buffer\n");
         return 1;
     }
 
     pthread_t monitor_tid;
-    if (pthread_create(&monitor_tid, NULL, monitor_thread, pb) != 0) {
-        fprintf(stderr, "BŁĄD: Nie można utworzyć wątku\n");
-        return 1;
-    }
+    pthread_create(&monitor_tid, NULL, monitor_thread, pb);
 
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
@@ -682,8 +751,8 @@ int main(int argc, char *argv[]) {
     create_overlay_window();
 
     printf("[NetWatch] Overlay aktywny - Ctrl+C aby zakończyć\n");
-    printf("[NetWatch] Skróty: 1=BOTH, 2=IN, 3=OUT, Q=quit\n");
-    printf("[NetWatch] Test: curl http://example.com\n\n");
+    printf("[NetWatch] Test: curl http://example.com\n");
+    printf("[NetWatch] Test FAIL: curl http://1.2.3.4:9999 --max-time 3\n\n");
 
     gtk_main();
 
@@ -691,6 +760,7 @@ int main(int argc, char *argv[]) {
     pthread_join(monitor_tid, NULL);
     perf_buffer__free(pb);
     bpf_link__destroy(link_out);
+    bpf_link__destroy(link_state);
     bpf_link__destroy(link_in);
     bpf_object__close(obj);
 

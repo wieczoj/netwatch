@@ -271,7 +271,7 @@ static gboolean update_overlay(gpointer data) {
     if (g_log_count == 0) {
         gtk_text_buffer_get_end_iter(g_text_buffer, &end);
         gtk_text_buffer_insert_with_tags_by_name(g_text_buffer, &end,
-            "NetWatch - oczekiwanie na polaczenia...\n",
+            "NetWatch - waiting for connections...\n",
             -1, "info", NULL);
         pthread_mutex_unlock(&g_log_mutex);
         return TRUE;
@@ -639,7 +639,7 @@ static void *monitor_thread(void *arg) {
 
 static void signal_handler(int sig) {
     (void)sig;
-    fprintf(stderr, "\n[NetWatch] Otrzymano sygnał, kończę...\n");
+    fprintf(stderr, "\n[NetWatch] Signal received, shutting down...\n");
     g_running = 0;
     gtk_main_quit();
 }
@@ -656,7 +656,7 @@ static void print_about(void) {
     printf("║  Modern Linux kernel technology:                           ║\n");
     printf("║    • eBPF with kprobes                                     ║\n");
     printf("║    • CO-RE (BPF_CORE_READ)                                 ║\n");
-    printf("║    • perf_event for kernel→user communication              ║\n");
+    printf("║    • perf_event for kernel->user communication             ║\n");
     printf("║    • GTK3 + X11 compositing                                ║\n");
     printf("║                                                            ║\n");
     printf("║  Author:  Janusz Wieczorek                                 ║\n");
@@ -667,40 +667,44 @@ static void print_about(void) {
     printf("║                                                            ║\n");
     printf("╠════════════════════════════════════════════════════════════╣\n");
     printf("║                                                            ║\n");
-    printf("║  💝 Support development:                                   ║\n");
+    printf("║  Support development:                                      ║\n");
     printf("║                                                            ║\n");
-    printf("║     ☕ Ko-fi:  https://ko-fi.com/netwatch                  ║\n");
+    printf("║     Ko-fi:  https://ko-fi.com/netwatch                     ║\n");
     printf("║                                                            ║\n");
     printf("║  Donors get priority on feature requests!                  ║\n");
     printf("║  All features eventually open-sourced in NetWatch.         ║\n");
     printf("║                                                            ║\n");
-    printf("║  📧 Business inquiries: konradverse@gmail.com              ║\n");
+    printf("║  Business inquiries: konradverse@gmail.com                 ║\n");
     printf("║                                                            ║\n");
     printf("╚════════════════════════════════════════════════════════════╝\n");
     printf("\n");
 }
-
 static void print_help(const char *prog) {
-    printf("Użycie: sudo %s [OPCJE]\n\n", prog);
-    printf("NetWatch v1.0.0 - Monitor połączeń sieciowych z eBPF\n\n");
-    printf("Opcje:\n");
-    printf("  -q, --quiet          Wyłącz debug na stderr\n");
-    printf("  -d, --direction DIR  Filtruj kierunek (in/out/both), domyślnie: both\n");
-    printf("  -a, --about          Pokaż informacje o programie i autorze\n");
-    printf("  -h, --help           Pokaż tę pomoc\n");
-    printf("\nSkróty klawiszowe:\n");
-    printf("  1  Pokazuj wszystkie (BOTH)\n");
-    printf("  2  Tylko przychodzące (IN)\n");
-    printf("  3  Tylko wychodzące (OUT)\n");
-    printf("  Q  Zakończ\n");
-    printf("\nKolory w oknie:\n");
-    printf("  szary (italic)  - próba połączenia (PENDING)\n");
-    printf("  zielony         - sukces (INFO + OK)\n");
-    printf("  pomarańczowy    - warning (porty 1024-49151)\n");
-    printf("  czerwony        - krytyczny (porty <1024)\n");
-    printf("  czerwony bold   - FAILED/BLOCKED\n");
-    printf("\n💝 Support development: https://ko-fi.com/netwatch\n");
-    printf("📦 Source code:        https://github.com/wieczoj/netwatch\n");
+    printf("Usage: sudo %s [OPTIONS]\n\n", prog);
+    printf("NetWatch v1.0.0 - Network connection monitor using eBPF\n\n");
+    printf("Options:\n");
+    printf("  -q, --quiet          Disable debug output on stderr\n");
+    printf("  -d, --direction DIR  Filter direction (in/out/both), default: both\n");
+    printf("  -a, --about          Show project info and author\n");
+    printf("  -h, --help           Show this help\n");
+    printf("\nKeyboard shortcuts (in overlay window):\n");
+    printf("  1  Show all connections (BOTH)\n");
+    printf("  2  Show inbound only (IN)\n");
+    printf("  3  Show outbound only (OUT)\n");
+    printf("  Q  Quit\n");
+    printf("\nColor coding:\n");
+    printf("  gray (italic)  - connection attempt (PENDING)\n");
+    printf("  green          - success (INFO + OK)\n");
+    printf("  orange         - warning (ports 1024-49151)\n");
+    printf("  red            - critical (ports <1024)\n");
+    printf("  red bold       - FAILED / BLOCKED\n");
+    printf("\nExamples:\n");
+    printf("  sudo %s                  # Monitor all connections\n", prog);
+    printf("  sudo %s -d out           # Outbound connections only\n", prog);
+    printf("  sudo %s -d in -q         # Inbound only, quiet mode\n", prog);
+    printf("  %s --about               # Show project info (no sudo)\n", prog);
+    printf("\nSupport development: https://ko-fi.com/netwatch\n");
+    printf("Source code:         https://github.com/wieczoj/netwatch\n");
 }
 
 int main(int argc, char *argv[]) {
@@ -716,9 +720,12 @@ int main(int argc, char *argv[]) {
                 else if (strcmp(argv[i], "out") == 0) g_filter = FILTER_OUT;
                 else if (strcmp(argv[i], "both") == 0) g_filter = FILTER_BOTH;
                 else {
-                    fprintf(stderr, "Nieznany kierunek: %s\n", argv[i]);
+                    fprintf(stderr, "Unknown direction: %s (use: in/out/both)\n", argv[i]);
                     return 1;
                 }
+            } else {
+                fprintf(stderr, "Missing value for -d/--direction\n");
+                return 1;
             }
         }
         else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
@@ -733,28 +740,31 @@ int main(int argc, char *argv[]) {
 
 
     if (geteuid() != 0) {
-        fprintf(stderr, "BŁĄD: Wymagane uprawnienia root\n");
+        fprintf(stderr, "ERROR: Root privileges required (eBPF)\n");
+        fprintf(stderr, "Run: sudo %s\n", argv[0]);
+        fprintf(stderr, "\nUse --help for usage or --about for project info.\n");
         return 1;
     }
 
 
 
     const char *filter_str[] = {"BOTH", "IN", "OUT"};
-    printf("[NetWatch] sizeof(struct conn_event) = %zu bajtów\n",
+    printf("[NetWatch] sizeof(struct conn_event) = %zu bytes\n",
            sizeof(struct conn_event));
-    printf("[NetWatch] Filtr kierunku: %s\n", filter_str[g_filter]);
+    printf("[NetWatch] Direction filter: %s\n", filter_str[g_filter]);
 
     gtk_init(&argc, &argv);
     memset(g_logs, 0, sizeof(g_logs));
 
     struct bpf_object *obj = bpf_object__open_file("netwatch.bpf.o", NULL);
     if (libbpf_get_error(obj)) {
-        fprintf(stderr, "BŁĄD: Nie można otworzyć netwatch.bpf.o\n");
+        fprintf(stderr, "ERROR: Cannot open netwatch.bpf.o\n");
+        fprintf(stderr, "Make sure the file is in the current directory.\n");
         return 1;
     }
 
     if (bpf_object__load(obj)) {
-        fprintf(stderr, "BŁĄD: Nie można załadować eBPF: %s\n",
+        fprintf(stderr, "ERROR: Failed to load eBPF: %s\n",
                 strerror(errno));
         return 1;
     }
@@ -767,10 +777,10 @@ int main(int argc, char *argv[]) {
         bpf_object__find_program_by_name(obj, "trace_inbound_accept");
 
     if (!prog_out || !prog_state || !prog_in) {
-        fprintf(stderr, "BŁĄD: Nie znaleziono wymaganych programów BPF\n");
-        if (!prog_out) fprintf(stderr, "  - brak trace_outbound_connect\n");
-        if (!prog_state) fprintf(stderr, "  - brak trace_tcp_set_state\n");
-        if (!prog_in) fprintf(stderr, "  - brak trace_inbound_accept\n");
+        fprintf(stderr, "ERROR: Required BPF programs not found\n");
+        if (!prog_out) fprintf(stderr, "  - missing trace_outbound_connect\n");
+        if (!prog_state) fprintf(stderr, "  - missing trace_tcp_set_state\n");
+        if (!prog_in) fprintf(stderr, "  - missing trace_inbound_accept\n");
         return 1;
     }
 
@@ -779,18 +789,18 @@ int main(int argc, char *argv[]) {
     struct bpf_link *link_in = bpf_program__attach(prog_in);
 
     if (libbpf_get_error(link_out) || libbpf_get_error(link_state) || libbpf_get_error(link_in)) {
-        fprintf(stderr, "BŁĄD podłączania kprobes\n");
+        fprintf(stderr, "ERROR: Failed to attach kprobes\n");
         return 1;
     }
 
-    printf("[NetWatch] eBPF aktywny:\n");
-    printf("  - kprobe/tcp_connect (próby wychodzące)\n");
-    printf("  - kprobe/tcp_set_state (wyniki SUCCESS/FAILED)\n");
-    printf("  - kretprobe/inet_csk_accept (przychodzące - akceptacja)\n");
+    printf("[NetWatch] eBPF active:\n");
+    printf("  - kprobe/tcp_connect (outbound attempts)\n");
+    printf("  - kprobe/tcp_set_state (SUCCESS/FAILED results)\n");
+    printf("  - kretprobe/inet_csk_accept (inbound acceptance)\n");
 
     int map_fd = bpf_object__find_map_fd_by_name(obj, "events");
     if (map_fd < 0) {
-        fprintf(stderr, "BŁĄD: Nie znaleziono mapy 'events'\n");
+        fprintf(stderr, "ERROR: Cannot find 'events' map\n");
         return 1;
     }
 
@@ -798,20 +808,24 @@ int main(int argc, char *argv[]) {
         handle_event, handle_lost, NULL, NULL);
 
     if (libbpf_get_error(pb)) {
-        fprintf(stderr, "BŁĄD: perf_buffer\n");
+        fprintf(stderr, "ERROR: Cannot create perf buffer\n");
         return 1;
     }
 
     pthread_t monitor_tid;
-    pthread_create(&monitor_tid, NULL, monitor_thread, pb);
+    if (pthread_create(&monitor_tid, NULL, monitor_thread, pb) != 0) {
+        fprintf(stderr, "ERROR: Cannot create monitor thread\n");
+        return 1;
+    }
 
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
 
     create_overlay_window();
 
-    printf("[NetWatch] Overlay aktywny - Ctrl+C aby zakończyć\n");
-    printf("[NetWatch] Test: curl http://example.com\n");
+    printf("[NetWatch] Overlay active - press Ctrl+C to exit\n");
+    printf("[NetWatch] Shortcuts: 1=BOTH, 2=IN, 3=OUT, Q=quit\n");
+    printf("[NetWatch] Test:      curl http://example.com\n");
     printf("[NetWatch] Test FAIL: curl http://1.2.3.4:9999 --max-time 3\n\n");
 
     gtk_main();
@@ -824,6 +838,6 @@ int main(int argc, char *argv[]) {
     bpf_link__destroy(link_in);
     bpf_object__close(obj);
 
-    printf("[NetWatch] Zakończono\n");
+    printf("[NetWatch] Stopped\n");
     return 0;
 }

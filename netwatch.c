@@ -1,3 +1,16 @@
+/*
+ * NetWatch - Real-time network connection monitor for Linux
+ *
+ * Copyright (c) 2026 Janusz Wieczorek
+ *
+ * This file is part of NetWatch.
+ * Licensed under the MIT License.
+ * See LICENSE file in the project root for full license text.
+ *
+ * Repository: https://github.com/wieczoj/netwatch
+ *
+ * SPDX-License-Identifier: MIT
+ */
 // netwatch.c - v1.2 - dodane statusy połączeń (SUCCESS/FAILED/PENDING)
 
 #define _GNU_SOURCE

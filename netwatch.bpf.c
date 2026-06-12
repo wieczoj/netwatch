@@ -1,3 +1,18 @@
+/*
+ * NetWatch - eBPF kernel-side monitoring code
+ *
+ * Copyright (c) 2026 Janusz Wieczorek
+ *
+ * This file is part of NetWatch.
+ * Licensed under GNU General Public License v2.0 (GPL-2.0).
+ *
+ * GPL v2 is required because this code uses GPL-only kernel helpers
+ * (such as bpf_perf_event_output).
+ *
+ * Repository: https://github.com/wieczoj/netwatch
+ *
+ * SPDX-License-Identifier: GPL-2.0
+ */
 // netwatch.bpf.c - Kod eBPF z śledzeniem statusu połączeń
 // Wersja: 1.2 - dodane statusy SUCCESS/FAILED
 
